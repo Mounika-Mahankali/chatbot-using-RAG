@@ -7,9 +7,10 @@ from datetime import datetime
 from db import SessionLocal, User, Chat, ChatSession
 from multimodal import get_response #main LLM function calls groq api
 from summary import summarize_chat
+from langchain_memory import save_to_memory, summarize_memory
 
 # RAG Imports
-from rag import get_retriever, get_persistent_retriever, save_pdfs_to_vector_db
+from rag import load_rag, get_retriever, get_persistent_retriever, save_pdfs_to_vector_db
 from vector_db import delete_vector_index
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough
@@ -111,7 +112,7 @@ def load_rag(chat_session_id: int = None, pdf_paths=None):
     llm = CustomLLM()
 
     if retriever is None:
-        return llm
+        return lambda query: llm.invoke(query)
     #ChatPromptTemplate=context+ques
     prompt = ChatPromptTemplate.from_template(
     """Answer the question based only on the context:
@@ -133,7 +134,34 @@ def load_rag(chat_session_id: int = None, pdf_paths=None):
     )
 
     return qa
+# Full chat summarization function
+def summarize_full_chat(session_id):
 
+    chats = db.query(Chat).filter_by(session_id=session_id).all()
+
+    if not chats:
+        return "No chat available to summarize."
+
+    conversation = ""
+
+    for c in chats:
+        conversation += f"User: {c.message}\nAssistant: {c.response}\n"
+
+    prompt = f"""
+Summarize the following conversation briefly:
+
+{conversation}
+"""
+
+    return get_response(prompt)
+
+# Load previous chats into memory
+def load_memory_from_db(session_id):
+
+    chats = db.query(Chat).filter_by(session_id=session_id).all()
+
+    for chat in chats:
+        save_to_memory(chat.message, chat.response)
 
 # AUTH
 def login(u, p):
@@ -403,6 +431,8 @@ if st.session_state.user:
         messages = db.query(Chat).filter_by(
             session_id=st.session_state.chat_id
         ).all()
+        # Load memory from DB
+        load_memory_from_db(st.session_state.chat_id)
 
         # DISPLAY CHAT
         for m in messages:
@@ -420,6 +450,7 @@ if st.session_state.user:
             with st.chat_message("assistant"):
                 st.write(m.response)
 
+        
         # TEXT INPUT
         st.markdown("### 💬 Ask Questions")
         prompt = st.chat_input("Ask about the document or describe what you need...")
@@ -428,22 +459,47 @@ if st.session_state.user:
 
             try:
 
-                image_data = st.session_state.last_image
+                # Handle summarize prompt first
+                if "summarize" in prompt.lower():
 
-                # RAG + IMAGE LOGIC
-                if image_data:
-                    response = get_response(prompt, image_data)
+                    response = summarize_full_chat(st.session_state.chat_id)
+
                 else:
-                    # Use persistent retriever if available, otherwise use general LLM
-                    if st.session_state.current_retriever is not None:
-                        # Load RAG with persistent retriever
-                        qa = load_rag(chat_session_id=st.session_state.chat_id)
-                        response = qa.invoke(prompt)
-                    else:
-                        # Fallback to general knowledge
-                        qa = load_rag(chat_session_id=st.session_state.chat_id)
-                        response = qa.invoke(prompt)
 
+                    image_data = st.session_state.last_image
+
+                    # RAG + IMAGE LOGIC
+                    if image_data:
+                        image_data = st.session_state.last_image
+                        st.session_state.last_image = None
+
+                        response = get_response(prompt, image_data)
+                    else:
+                        # Use persistent retriever if available
+                        if st.session_state.current_retriever is not None:
+
+                            qa = load_rag(chat_session_id=st.session_state.chat_id)
+
+                            if hasattr(qa, "invoke"):
+                                response = qa.invoke(prompt)
+                            else:
+                                response = qa(prompt)
+
+                            save_to_memory(prompt, response)
+
+                        else:
+
+                            qa = load_rag(chat_session_id=st.session_state.chat_id)
+
+                            if hasattr(qa, "invoke"):
+                                response = qa.invoke(prompt)
+                            else:
+                                response = qa(prompt)
+
+                            save_to_memory(prompt, response)
+
+
+                # Save chat to DB
                 db.add(
                     Chat(
                         session_id=st.session_state.chat_id,
@@ -454,20 +510,17 @@ if st.session_state.user:
                 )
 
                 db.commit()
+
+                #  In-memory summary debug
+                memory_summary = summarize_memory()
+                print("IN MEMORY SUMMARY:", memory_summary)
+
+                if memory_summary:
+                    st.markdown("---")
+                    st.markdown("### 🧠 Conversation Summary")
+                    st.info(memory_summary)
+
                 st.rerun()
 
             except Exception as e:
                 st.error(str(e))
-
-        # SUMMARY
-        if st.button("Summarize Chat"):
-
-            try:
-                summary = summarize_chat(messages)
-                st.info(summary)
-
-            except Exception as e:
-                st.error(str(e))
-
-
-
