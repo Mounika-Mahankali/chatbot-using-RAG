@@ -1,40 +1,42 @@
-from langchain.memory import ConversationSummaryMemory
-from langchain_core.language_models import LLM
+from multimodal import get_response
+
+conversation_history = []
+conversation_summary = ""
 
 
-# Wrapper for your existing Groq function
-class CustomLLM(LLM):
+def save_to_memory(user_input, response):
 
-    def _call(self, prompt, stop=None):
-        from multimodal import get_response
-        return get_response(prompt)
+    global conversation_history
 
-    @property
-    def _identifying_params(self):
-        return {}
-
-    @property
-    def _llm_type(self):
-        return "custom_groq"
-
-
-# Initialize memory
-llm = CustomLLM()
-
-memory = ConversationSummaryMemory(
-    llm=llm,
-    return_messages=True
-)
-
-
-def update_memory(user_input, ai_output):
-    memory.save_context(
-        {"input": user_input},
-        {"output": ai_output}
+    conversation_history.append(
+        f"User: {user_input}\nAssistant: {response}"
     )
 
 
-def get_memory():
-    return memory.buffer
+def summarize_memory():
 
-#ConversationBufferMemory=Stores all chats
+    global conversation_history
+    global conversation_summary
+
+    if not conversation_history:
+        return conversation_summary
+
+    prompt = f"""
+    Summarize the following conversation briefly:
+
+    {conversation_summary}
+
+    {' '.join(conversation_history)}
+    """
+
+    summary = get_response(prompt)
+
+    conversation_summary = summary
+    conversation_history = []
+
+    return conversation_summary
+
+
+def get_memory():
+
+    return conversation_summary
