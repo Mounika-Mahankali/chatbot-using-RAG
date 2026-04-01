@@ -10,7 +10,7 @@ from summary import summarize_chat
 from langchain_memory import save_to_memory, summarize_memory
 
 # RAG Imports
-from rag import load_rag, get_retriever, get_persistent_retriever, save_pdfs_to_vector_db
+from rag import load_rag, get_retriever, get_persistent_retriever, save_pdfs_to_vector_db, generate_image_response
 from vector_db import delete_vector_index
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough
@@ -92,48 +92,8 @@ class CustomLLM(LLM):
         return "custom_groq"
 
 
-# Load or create RAG
-def load_rag(chat_session_id: int = None, pdf_paths=None):
-    """
-    Load RAG system with persistent embeddings.
-    If chat_session_id provided, loads from persistent storage.
-    If pdf_paths provided, creates in-memory index (legacy behavior).
-    """
-    retriever = None
-    
-    # Try to load from persistent storage first
-    if chat_session_id:
-        retriever = get_persistent_retriever(chat_session_id)
-    
-    # Fallback to legacy in-memory retriever
-    if retriever is None and pdf_paths:
-        retriever = get_retriever(pdf_paths)
 
-    llm = CustomLLM()
 
-    if retriever is None:
-        return lambda query: llm.invoke(query)
-    #ChatPromptTemplate=context+ques
-    prompt = ChatPromptTemplate.from_template(
-    """Answer the question based only on the context:
-    {context}
-
-    Question: {input}
-    """)
-
-    # Format documents function (replaces create_stuff_documents_chain)
-    def format_docs(docs):
-        return "\n\n".join(doc.page_content for doc in docs)
-
-    #rag pipeline
-    qa = (
-        {"context": retriever | format_docs, "input": RunnablePassthrough()}
-        | prompt
-        | llm
-        | StrOutputParser()
-    )
-
-    return qa
 # Full chat summarization function
 def summarize_full_chat(session_id):
 
@@ -450,6 +410,22 @@ if st.session_state.user:
             with st.chat_message("assistant"):
                 st.write(m.response)
 
+                # Show Logs Button
+                if hasattr(m, "logs") and m.logs:
+
+                    if st.button("📊 Logs", key=f"log_{m.id}"):
+
+                        logs = json.loads(m.logs)
+
+                        for log in logs:
+                            st.write(
+                                f"[RAG] {log['function']} | "
+                                f"Start: {log['start']} | "
+                                f"End: {log['end']} | "
+                                f"Duration: {log['duration']} ms | "
+                                f"Status: {log['status']}"
+                            )
+
         
         # TEXT INPUT
         st.markdown("### 💬 Ask Questions")
@@ -458,6 +434,7 @@ if st.session_state.user:
         if prompt:
 
             try:
+                st.session_state.current_query_logs = []
 
                 # Handle summarize prompt first
                 if "summarize" in prompt.lower():
@@ -473,12 +450,15 @@ if st.session_state.user:
                         image_data = st.session_state.last_image
                         st.session_state.last_image = None
 
-                        response = get_response(prompt, image_data)
+                        response = generate_image_response(prompt, image_data)
                     else:
                         # Use persistent retriever if available
                         if st.session_state.current_retriever is not None:
 
+                            # Always reload RAG for every query
                             qa = load_rag(chat_session_id=st.session_state.chat_id)
+
+                            print("Calling RAG for query...")  
 
                             if hasattr(qa, "invoke"):
                                 response = qa.invoke(prompt)
@@ -499,21 +479,33 @@ if st.session_state.user:
                             save_to_memory(prompt, response)
 
 
-                # Save chat to DB
+                # Save chat to DB with logs
+                logs = json.dumps(st.session_state.get("current_query_logs", []))
+
                 db.add(
                     Chat(
                         session_id=st.session_state.chat_id,
                         message=prompt,
                         response=response,
-                        image=None
+                        image=None,
+                        logs=logs
                     )
                 )
 
                 db.commit()
 
-                #  In-memory summary debug
+                #  In-memory summary 
                 memory_summary = summarize_memory()
                 print("IN MEMORY SUMMARY:", memory_summary)
+
+                # Store summary into DB
+                session = db.query(ChatSession).filter_by(
+                    id=st.session_state.chat_id
+                ).first()
+
+                if session:
+                    session.summary = memory_summary
+                    db.commit()
 
                 if memory_summary:
                     st.markdown("---")
