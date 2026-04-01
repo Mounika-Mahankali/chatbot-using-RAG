@@ -49,5 +49,6 @@ class Chat(Base):
     message = Column(Text)
     response = Column(Text)
     image = Column(Text)   # (base64 image)
+    logs = Column(Text)
 
 Base.metadata.create_all(engine)
