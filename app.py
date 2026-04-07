@@ -10,7 +10,7 @@ from summary import summarize_chat
 from langchain_memory import save_to_memory, summarize_memory
 
 # RAG Imports
-from rag import load_rag, get_retriever, get_persistent_retriever, save_pdfs_to_vector_db, generate_image_response
+from rag import load_rag, save_pdfs_to_vector_db, generate_image_response,get_persistent_retriever
 from vector_db import delete_vector_index
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough
@@ -216,10 +216,7 @@ if st.session_state.user:
                 st.session_state.pdf_paths = []
             
             # Load persistent retriever for this session
-            if c.has_embeddings:
-                st.session_state.current_retriever = get_persistent_retriever(c.id)
-            else:
-                st.session_state.current_retriever = None
+            st.session_state.current_retriever = None
             
             st.rerun()
 
@@ -363,25 +360,19 @@ if st.session_state.user:
                 st.session_state.pdf_paths.extend(new_paths)
                 st.session_state.last_uploaded_pdfs = pdf_uploads
 
-                # Save to persistent vector database
+                # Load documents for vector-less RAG
                 if st.session_state.chat_id:
-                    with st.spinner("🔄 Creating embeddings and storing in vector database..."):
+                    with st.spinner("Loading documents for Vector-less RAG..."):
                         current_chat = db.query(ChatSession).filter_by(id=st.session_state.chat_id).first()
                         if current_chat:
-                            # Process and save PDFs to vector DB
+
                             save_pdfs_to_vector_db(new_paths, st.session_state.chat_id)
 
-                            # Update database flags
                             current_chat.pdf_path = json.dumps(st.session_state.pdf_paths)
-                            current_chat.has_embeddings = 1
-                            current_chat.embeddings_updated_at = datetime.now()
                             db.commit()
 
-                            # Load the persistent retriever
-                            st.session_state.current_retriever = get_persistent_retriever(st.session_state.chat_id)
-
                 st.success(f"✅ **{len(pdf_uploads)} uploaded successfully!**")
-                st.info("📊 Embeddings created and stored in vector database. Your documents are ready for fast retrieval!")
+                st.info("📄 Documents loaded successfully.")
 
             except Exception as e:
                 st.error(f"❌ Error uploading PDFs: {str(e)}")
