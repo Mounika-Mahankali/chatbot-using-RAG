@@ -11,7 +11,7 @@ from vector_db import process_and_save_pdfs
 import pickle
 import os
 
-# Import Logger
+
 from logger import log_execution
 
 # Document loaders
@@ -29,15 +29,37 @@ from pathlib import Path
 
 from rank_bm25 import BM25Okapi
 
+from pptx import Presentation
+from PIL import Image
+import io
+from langchain_core.documents import Document
+from pptx.enum.shapes import MSO_SHAPE_TYPE
 
 
 # Store documents globally
 vectorless_docs = []
+bm25_model = None
 CHUNKS_FILE = "vectorless_chunks.pkl"
 # Load chunks if file exists
+# Load saved chunks
 if os.path.exists(CHUNKS_FILE):
+
     with open(CHUNKS_FILE, "rb") as f:
-        vectorless_docs = pickle.load(f)
+
+        data = pickle.load(f)
+        
+        if isinstance(data, list):   #list format storage
+            vectorless_docs = data
+            bm25_model = None
+  
+        else:         #dictionary format storage
+            vectorless_docs = data["docs"]
+            bm25_model = data["bm25"]
+
+        vectorless_docs = data["docs"]
+        bm25_model = data["bm25"]
+
+        print("Loaded vectorless docs:", len(vectorless_docs))
 
 # Custom LLM
 class CustomLLM(LLM):
@@ -110,10 +132,28 @@ def load_documents(file_path):
     return loader.load()
 
 
+def extract_images_from_ppt(ppt_path):
+
+    images = []
+
+    prs = Presentation(ppt_path)
+
+    for slide in prs.slides:
+        for shape in slide.shapes:
+            if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
+
+                image = shape.image
+                image_bytes = image.blob
+
+                images.append(image_bytes)
+
+    return images
+
 # Load vectorless docs
 def load_vectorless_docs(pdf_paths):
 
     global vectorless_docs
+    global bm25_model
 
     all_documents = []
 
@@ -126,18 +166,50 @@ def load_vectorless_docs(pdf_paths):
         if documents:
             all_documents.extend(documents)
 
+        # Extract images from PPT
+        if file_path.suffix == ".pptx":
+
+            images = extract_images_from_ppt(file_path)
+
+            for img in images:
+                try:
+                    caption = get_response(
+                        "Describe this image in detail",
+                        img
+                    )
+
+                    all_documents.append(
+                        Document(page_content=caption)
+                    )
+
+                except Exception as e:
+                    print(f"Image extraction error: {e}")
+
+    # Split documents
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=500,
         chunk_overlap=50
     )
 
-    vectorless_docs = text_splitter.split_documents(all_documents)
-    # Save chunks to disk
+    new_docs = text_splitter.split_documents(all_documents)
+
+    vectorless_docs.extend(new_docs)
+
+    # rebuild bm25
+    tokenized_docs = [
+        doc.page_content.lower().split()
+        for doc in vectorless_docs
+]
+
+    bm25_model = BM25Okapi(tokenized_docs)
+
     with open(CHUNKS_FILE, "wb") as f:
-        pickle.dump(vectorless_docs, f)
+        pickle.dump({
+            "docs": vectorless_docs,
+            "bm25": bm25_model
+        }, f)
 
     st.write("Chunks stored:", len(vectorless_docs))
-
 
 
 # Load RAG
@@ -201,31 +273,21 @@ def get_persistent_retriever(chat_session_id):
 @log_execution("bm25_retrieval")
 def bm25_retrieval(query):
 
+    global bm25_model
     global vectorless_docs
 
-    if not vectorless_docs:
+    if not bm25_model:
         return []
 
-    # Tokenize documents
-    tokenized_docs = [
-        doc.page_content.lower().split()
-        for doc in vectorless_docs
-    ]
-
-    # Create BM25 object
-    bm25 = BM25Okapi(tokenized_docs)
-
-    # Tokenize query
     query_tokens = query.lower().split()
 
-    # Get scores
-    scores = bm25.get_scores(query_tokens)
+    docs = bm25_model.get_top_n(
+        query_tokens,
+        vectorless_docs,
+        n=3
+    )
 
-    # Get top documents
-    top_indices = sorted(
-        range(len(scores)),
-        key=lambda i: scores[i],
-        reverse=True
-    )[:3]
+    return docs
 
-    return [vectorless_docs[i] for i in top_indices]
+
+
