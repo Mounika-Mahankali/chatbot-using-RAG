@@ -274,7 +274,7 @@ if st.session_state.user:
                 st.markdown("### 📋 Current Documents")
                 if st.session_state.pdf_paths:
                     st.success(f"📄 **Active:** {len(st.session_state.pdf_paths)} document(s)")
-                    for path in st.session_state.pdf_paths:
+                    for path in set(st.session_state.pdf_paths):
                         st.caption(f"• {Path(path).name}")
 
                 if st.button("🗑️ Remove All Documents (use general chat)", key="remove_docs"):
@@ -355,7 +355,10 @@ if st.session_state.user:
                     pdf_path = uploads_dir / f"{st.session_state.user}_{pdf_upload.name}"
                     with open(pdf_path, "wb") as f:
                         f.write(pdf_upload.getbuffer())
-                    new_paths.append(str(pdf_path))
+
+                    # Prevent duplicates
+                    if str(pdf_path) not in st.session_state.pdf_paths:
+                        new_paths.append(str(pdf_path))
 
                 st.session_state.pdf_paths.extend(new_paths)
                 st.session_state.last_uploaded_pdfs = pdf_uploads
