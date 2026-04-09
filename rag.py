@@ -12,6 +12,7 @@ import pickle
 import os
 
 
+import re
 from logger import log_execution
 
 # Document loaders
@@ -81,19 +82,36 @@ def generate_response(llm, prompt):
     return llm.invoke(prompt)
 
 
+
 @log_execution("reranking")
-def rerank_documents(query, docs, top_k=3):
+def rerank_documents(query, docs, top_k=5):
 
     if not docs:
         return docs
 
+    query_tokens = re.findall(r"\w+", query.lower())
+
+    scored_docs = []
+
+    for doc in docs:
+
+        text = doc.page_content.lower()
+
+        score = sum(
+            1 for token in query_tokens 
+            if token in text
+        )
+
+        if score >= 2:   
+            scored_docs.append((score, doc))
+
     ranked_docs = sorted(
-        docs,
-        key=lambda x: len(x.page_content),
+        scored_docs,
+        key=lambda x: x[0],
         reverse=True
     )
 
-    return ranked_docs[:top_k]
+    return [doc for _, doc in ranked_docs[:top_k]]
 
 
 @log_execution("image_llm_generation")
@@ -164,7 +182,9 @@ def load_vectorless_docs(pdf_paths):
         documents = load_documents(file_path)
 
         if documents:
-            all_documents.extend(documents)
+            for doc in documents:
+                doc.metadata = {"source": file_path.name}
+                all_documents.append(doc)
 
         # Extract images from PPT
         if file_path.suffix == ".pptx":
@@ -177,9 +197,9 @@ def load_vectorless_docs(pdf_paths):
                         "Describe this image in detail",
                         img
                     )
-
+                    #every chunk will have source file name 
                     all_documents.append(
-                        Document(page_content=caption)
+                        Document(page_content=caption,metadata={"source": file_path.name})
                     )
 
                 except Exception as e:
@@ -187,8 +207,8 @@ def load_vectorless_docs(pdf_paths):
 
     # Split documents
     text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=500,
-        chunk_overlap=50
+        chunk_size=1000,
+        chunk_overlap=100
     )
 
     new_docs = text_splitter.split_documents(all_documents)
@@ -228,17 +248,29 @@ def load_rag(chat_session_id=None):
 
         docs = rerank_documents(query, docs)
 
+        docs = filter_best_document(docs)
+
         if not docs:
             response = generate_response(llm, query)
             return post_process_response(response)
 
         context = format_docs(docs)
 
+        best_source = docs[0].metadata.get("source", "Unknown")
+        sources = [best_source]
+
         prompt = create_prompt(context, query)
 
         response = generate_response(llm, prompt)
 
-        return post_process_response(response)
+        response = post_process_response(response)
+
+        if sources:
+            response += "\n\n**Sources:**\n"
+            for s in sources:
+                response += f"- {s}\n"
+
+        return response
 
     return vectorless_rag
 
@@ -248,8 +280,10 @@ def create_prompt(context, query):
     return f"""
 You are a helpful AI assistant.
 
-Use the provided context if it is relevant to the user's question.
-If the context is not relevant, answer using your general knowledge.
+Use the provided context to answer the question completely.
+If the answer exists in context, return full information.
+
+If context is not relevant, answer using general knowledge.
 
 Context:
 {context}
@@ -269,25 +303,75 @@ def save_pdfs_to_vector_db(pdf_paths, chat_session_id):
 def get_persistent_retriever(chat_session_id):
     return None
 
-
 @log_execution("bm25_retrieval")
 def bm25_retrieval(query):
 
-    global bm25_model
     global vectorless_docs
+    global bm25_model
 
-    if not bm25_model:
+    if not vectorless_docs:
         return []
 
-    query_tokens = query.lower().split()
+    query_tokens = preprocess_query(query)
 
-    docs = bm25_model.get_top_n(
-        query_tokens,
-        vectorless_docs,
-        n=3
+    scores = bm25_model.get_scores(query_tokens)
+    scores = list(scores)
+
+    scored_docs = list(zip(scores, vectorless_docs))
+
+    scored_docs = sorted(
+        scored_docs,
+        key=lambda x: x[0],
+        reverse=True
     )
 
-    return docs
+    
+    top_score = scored_docs[0][0] if scored_docs else 0
+
+    filtered_docs = [
+        doc for score, doc in scored_docs
+        if score >= top_score * 0.6   
+    ]
+
+    return filtered_docs[:5]
 
 
+def preprocess_query(query):
 
+    stopwords = {
+        "what","is","are","the","of","in","for",
+        "does","do","a","an","and","to"
+    }
+
+    tokens = re.findall(r"\w+", query.lower())
+
+    filtered = [
+        token for token in tokens
+        if token not in stopwords
+    ]
+
+    return filtered
+
+
+def filter_best_document(docs):
+
+    doc_scores = {}
+
+    for doc in docs:
+
+        source = doc.metadata.get("source", "Unknown")
+
+        if source not in doc_scores:
+            doc_scores[source] = 0
+
+        doc_scores[source] += 1
+
+    best_source = max(doc_scores, key=doc_scores.get)
+
+
+    filtered_docs = [
+        doc for doc in docs
+        if doc.metadata.get("source") == best_source
+    ]
+
+    return filtered_docs
