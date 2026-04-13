@@ -374,7 +374,7 @@ if st.session_state.user:
                             current_chat.pdf_path = json.dumps(st.session_state.pdf_paths)
                             db.commit()
 
-                st.success(f" **{len(pdf_uploads)} uploaded successfully!**")
+                st.success(f"✅ **{len(pdf_uploads)} uploaded successfully!**")
                 st.info("📄 Documents loaded successfully.")
 
             except Exception as e:
