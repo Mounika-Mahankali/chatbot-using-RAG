@@ -5,3 +5,4 @@ streamlit
 rank-bm25
 python-pptx
 pillow
+groq
