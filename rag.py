@@ -37,12 +37,11 @@ from langchain_core.documents import Document
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 
 
-# Store documents globally
+# Stores documents globally
 vectorless_docs = []
 bm25_model = None
 CHUNKS_FILE = "vectorless_chunks.pkl"
-# Load chunks if file exists
-# Load saved chunks
+# Load chunks if file exists or Load saved chunks
 if os.path.exists(CHUNKS_FILE):
 
     with open(CHUNKS_FILE, "rb") as f:
@@ -102,7 +101,7 @@ def rerank_documents(query, docs, top_k=5):
             if token in text
         )
 
-        if score >= 2:   
+        if score >= 3:   
             scored_docs.append((score, doc))
 
     ranked_docs = sorted(
@@ -191,19 +190,27 @@ def load_vectorless_docs(pdf_paths):
 
             images = extract_images_from_ppt(file_path)
 
-            for img in images:
-                try:
-                    caption = get_response(
-                        "Describe this image in detail",
-                        img
-                    )
-                    #every chunk will have source file name 
-                    all_documents.append(
-                        Document(page_content=caption,metadata={"source": file_path.name})
-                    )
+            if images:
+                progress = st.progress(0)
 
-                except Exception as e:
-                    print(f"Image extraction error: {e}")
+                for i, img in enumerate(images):
+                    try:
+                        caption = get_response(
+                            "Describe this image in detail",
+                            img
+                        )
+
+                        all_documents.append(
+                            Document(
+                                page_content=caption,
+                                metadata={"source": file_path.name}
+                            )
+                        )
+
+                        progress.progress((i + 1) / len(images))
+
+                    except Exception as e:
+                        print(f"Image extraction error: {e}")
 
     # Split documents
     text_splitter = RecursiveCharacterTextSplitter(
@@ -232,6 +239,34 @@ def load_vectorless_docs(pdf_paths):
     st.write("Chunks stored:", len(vectorless_docs))
 
 
+def filter_best_document(docs):
+
+    if not docs:
+        return docs
+
+    doc_scores = {}
+
+    for doc in docs:
+        source = doc.metadata.get("source", "Unknown")
+
+        if source not in doc_scores:
+            doc_scores[source] = 0
+
+        doc_scores[source] += 1
+
+    if not doc_scores:
+        return docs
+
+    best_source = max(doc_scores, key=doc_scores.get)
+
+    filtered_docs = [
+        doc for doc in docs
+        if doc.metadata.get("source") == best_source
+    ]
+
+    return filtered_docs
+
+
 # Load RAG
 def load_rag(chat_session_id=None):
 
@@ -244,7 +279,7 @@ def load_rag(chat_session_id=None):
 
     def vectorless_rag(query):
 
-        docs = bm25_retrieval(query)
+        docs = hybrid_retrieval(query)
 
         docs = rerank_documents(query, docs)
 
@@ -256,22 +291,19 @@ def load_rag(chat_session_id=None):
 
         context = format_docs(docs)
 
-        best_source = docs[0].metadata.get("source", "Unknown")
-        sources = [best_source]
-
-        prompt = create_prompt(context, query)
+        
+        prompt = create_rag_prompt(context, query)
 
         response = generate_response(llm, prompt)
 
         response = post_process_response(response)
 
-        if sources:
-            response += "\n\n**Sources:**\n"
-            for s in sources:
-                response += f"- {s}\n"
+        best_source = docs[0].metadata.get("source", "Unknown")
+
+        response += "\n\n**Sources:**\n"
+        response += f"- {best_source}\n"
 
         return response
-
     return vectorless_rag
 
 
@@ -353,25 +385,75 @@ def preprocess_query(query):
     return filtered
 
 
-def filter_best_document(docs):
-
-    doc_scores = {}
-
-    for doc in docs:
-
-        source = doc.metadata.get("source", "Unknown")
-
-        if source not in doc_scores:
-            doc_scores[source] = 0
-
-        doc_scores[source] += 1
-
-    best_source = max(doc_scores, key=doc_scores.get)
 
 
-    filtered_docs = [
-        doc for doc in docs
-        if doc.metadata.get("source") == best_source
-    ]
+def keyword_retrieval(query):
 
-    return filtered_docs
+    global vectorless_docs
+
+    query_tokens = query.lower().split()
+
+    matched_docs = []
+
+    for doc in vectorless_docs:
+        text = doc.page_content.lower()
+
+        if any(token in text for token in query_tokens):
+            matched_docs.append(doc)
+
+    return matched_docs[:5]
+
+
+def hybrid_retrieval(query):
+
+    top_k = dynamic_top_k(query)
+
+    bm25_docs = bm25_retrieval(query)
+
+    keyword_docs = keyword_retrieval(query)
+
+    combined_docs = bm25_docs + keyword_docs
+
+    unique_docs = []
+    seen = set()
+
+    for doc in combined_docs:
+        content = doc.page_content
+
+        if content not in seen:
+            unique_docs.append(doc)
+            seen.add(content)
+
+    return unique_docs[:top_k]
+
+def dynamic_top_k(query):
+
+    query = query.lower()
+
+    if any(word in query for word in ["list", "keywords", "types", "advantages"]):
+        return 6
+
+    if any(word in query for word in ["what is", "define", "meaning"]):
+        return 2
+
+    if any(word in query for word in ["difference", "compare"]):
+        return 4
+
+    return 5
+
+
+def create_rag_prompt(context, query):
+    return f"""
+You are a helpful AI assistant.
+
+Answer ONLY from the provided context.
+Do NOT add extra information.
+
+Context:
+{context}
+
+Question:
+{query}
+
+Answer:
+"""
