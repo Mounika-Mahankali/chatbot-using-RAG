@@ -8,7 +8,7 @@ from multimodal import get_response
 from langchain_memory import save_to_memory, summarize_memory
 
 # RAG Imports
-from rag import load_rag, save_pdfs_to_vector_db, generate_image_response
+from rag import load_rag, save_pdfs_to_db, generate_image_response
 
 st.set_page_config(layout="wide")
 
@@ -139,7 +139,7 @@ if st.session_state.user:
             with open(file_path, "wb") as f:
                 f.write(uploaded_file.getbuffer())
 
-            save_pdfs_to_vector_db(
+            save_pdfs_to_db(
                 [str(file_path)],
                 chat_session_id=st.session_state.chat_id
             )
