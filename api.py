@@ -3,24 +3,26 @@ from pydantic import BaseModel
 from typing import List
 import shutil
 import os
-
-from rag import load_rag, save_pdfs_to_vector_db, generate_image_response
+import traceback
+from rag import load_rag, save_pdfs_to_db, generate_image_response
 from multimodal import get_response
 from db import SessionLocal, User, Chat, ChatSession
 
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi import BackgroundTasks
 
 app = FastAPI()
 
 # CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:4200",   # frontend
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 # Load RAG only once 
 rag = load_rag()
 
@@ -48,6 +50,17 @@ class RenameRequest(BaseModel):
 class SummaryRequest(BaseModel):
     conversation: str
 
+class NewChatRequest(BaseModel):
+    user_id: int
+
+
+@app.get("/")
+def home():
+    return {"message": "API is running"}
+
+@app.options("/{path:path}")
+async def preflight_handler():
+    return {"status": "ok"}
 # Register
 
 @app.post("/register")
@@ -106,14 +119,14 @@ def login(request: LoginRequest):
 # New Chat
 
 @app.post("/new-chat")
-def new_chat(user_id: int):
+def new_chat(request: NewChatRequest):
 
     db = SessionLocal()
 
     try:
 
         chat = ChatSession(
-            user_id=user_id,
+            user_id=request.user_id,
             title="New Chat"
         )
 
@@ -125,8 +138,6 @@ def new_chat(user_id: int):
 
     finally:
         db.close()
-
-
 
 # Get Chats
 
@@ -197,18 +208,62 @@ def rename_chat(chat_id: int, request: RenameRequest):
     finally:
         db.close()
 
-# Chat API (STABLE VERSION)
 
-
-@app.post("/chat")
-def chat(request: ChatRequest):
+def generate_summary_background(session_id: int):
 
     db = SessionLocal()
 
     try:
+        messages = db.query(Chat).filter_by(
+            session_id=session_id
+        ).all()
 
-        # Generate response
-        response = rag(request.message)
+        if not messages:
+            return
+
+        conversation = ""
+
+        for m in messages:
+            conversation += f"User: {m.message}\n"
+            conversation += f"Bot: {m.response}\n"
+
+        summary = get_response(
+            f"Summarize this conversation briefly:\n{conversation}"
+        )
+
+        session = db.query(ChatSession).filter_by(
+            id=session_id
+        ).first()
+
+        if session:
+            session.summary = summary
+            db.commit()
+
+    except Exception as e:
+        print("Summary Error:", e)
+
+    finally:
+        db.close()
+
+# Chat API (STABLE VERSION)
+
+
+@app.post("/chat")
+def chat(request: ChatRequest, background_tasks: BackgroundTasks):
+
+    db = SessionLocal()
+
+    try:
+        print("Received message:", request.message)
+
+        # Generate response safely
+        try:
+            response = rag(request.message)
+        except Exception as e:
+            raise Exception(f"RAG failed: {str(e)}")
+
+        if not response:
+            raise Exception("Empty response from RAG")
 
         # Save chat
         db.add(
@@ -221,41 +276,27 @@ def chat(request: ChatRequest):
 
         db.commit()
 
-        # Generate summary every 5 messages (performance optimization)
-        messages = db.query(Chat).filter_by(
-            session_id=request.session_id
-        ).all()
-
-        if len(messages) % 5 == 0:
-
-            conversation = ""
-
-            for m in messages:
-                conversation += f"User: {m.message}\n"
-                conversation += f"Bot: {m.response}\n"
-
-            summary = get_response(
-                f"Summarize this conversation briefly:\n{conversation}"
-            )
-
-            session = db.query(ChatSession).filter_by(
-                id=request.session_id
-            ).first()
-
-            if session:
-                session.summary = summary
-                db.commit()
+        # Run summary in background
+        background_tasks.add_task(
+            generate_summary_background,
+            request.session_id
+        )
 
         return {"response": response}
 
     except Exception as e:
-
         db.rollback()
-        return {"error": str(e)}
+
+        print("Chat Error:")
+        print(traceback.format_exc())   
+
+        return {
+            "error": "Something went wrong",
+            "details": str(e)
+        }
 
     finally:
         db.close()
-
 # Chat History
 
 @app.get("/chat-history/{session_id}")
@@ -292,7 +333,7 @@ async def upload_docs(
             shutil.copyfileobj(file.file, buffer)
 
         # Save with session_id
-        save_pdfs_to_vector_db(
+        save_pdfs_to_db(
             [file_path],
             chat_session_id=session_id
         )
