@@ -37,9 +37,8 @@ from langchain_core.documents import Document
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 
 
-# Stores documents globally
-vectorless_docs = []
-bm25_model = None
+vectorless_docs = {}   # session_id → docs
+bm25_models = {}       # session_id → bm25 model
 CHUNKS_FILE = "vectorless_chunks.pkl"
 # Load chunks if file exists or Load saved chunks
 if os.path.exists(CHUNKS_FILE):
@@ -47,17 +46,16 @@ if os.path.exists(CHUNKS_FILE):
     with open(CHUNKS_FILE, "rb") as f:
 
         data = pickle.load(f)
-        
-        if isinstance(data, list):   #list format storage
-            vectorless_docs = data
-            bm25_model = None
-  
-        else:         #dictionary format storage
-            vectorless_docs = data["docs"]
-            bm25_model = data["bm25"]
 
-        vectorless_docs = data["docs"]
-        bm25_model = data["bm25"]
+        # Ensure correct structure (dictionary)
+        if isinstance(data, dict):
+            vectorless_docs = data.get("docs", {})
+            bm25_models = data.get("bm25_models", {})
+        else:
+            # OLD format → reset
+            print("Old chunk format detected. Resetting...")
+            vectorless_docs = {}
+            bm25_models = {}
 
         print("Loaded vectorless docs:", len(vectorless_docs))
 
@@ -167,7 +165,7 @@ def extract_images_from_ppt(ppt_path):
     return images
 
 # Load vectorless docs
-def load_vectorless_docs(pdf_paths):
+def load_vectorless_docs(pdf_paths, chat_session_id):
 
     global vectorless_docs
     global bm25_model
@@ -220,21 +218,24 @@ def load_vectorless_docs(pdf_paths):
 
     new_docs = text_splitter.split_documents(all_documents)
 
-    vectorless_docs.extend(new_docs)
+    if chat_session_id not in vectorless_docs:
+        vectorless_docs[chat_session_id] = []
+
+    vectorless_docs[chat_session_id].extend(new_docs)
 
     # rebuild bm25
     tokenized_docs = [
-        doc.page_content.lower().split()
-        for doc in vectorless_docs
+    doc.page_content.lower().split()
+    for doc in vectorless_docs[chat_session_id]
 ]
 
-    bm25_model = BM25Okapi(tokenized_docs)
+    bm25_models[chat_session_id] = BM25Okapi(tokenized_docs)
 
     with open(CHUNKS_FILE, "wb") as f:
         pickle.dump({
-            "docs": vectorless_docs,
-            "bm25": bm25_model
-        }, f)
+    "docs": vectorless_docs,
+    "bm25_models": bm25_models
+}, f)
 
     st.write("Chunks stored:", len(vectorless_docs))
 
@@ -279,7 +280,7 @@ def load_rag(chat_session_id=None):
 
     def vectorless_rag(query):
 
-        docs = hybrid_retrieval(query)
+        docs = hybrid_retrieval(query, chat_session_id)
 
         docs = rerank_documents(query, docs)
 
@@ -328,28 +329,32 @@ Answer:
 
 
 # Save docs when uploaded
-def save_pdfs_to_vector_db(pdf_paths, chat_session_id):
+def save_pdfs_to_db(pdf_paths, chat_session_id):
 
-    load_vectorless_docs(pdf_paths)
+    load_vectorless_docs(pdf_paths, chat_session_id)
 
 def get_persistent_retriever(chat_session_id):
     return None
 
 @log_execution("bm25_retrieval")
-def bm25_retrieval(query):
+def bm25_retrieval(query, chat_session_id):
 
     global vectorless_docs
     global bm25_model
 
-    if not vectorless_docs:
+    if chat_session_id not in vectorless_docs:
         return []
 
     query_tokens = preprocess_query(query)
+    bm25_model = bm25_models.get(chat_session_id)
+
+    if not bm25_model:
+        return []
 
     scores = bm25_model.get_scores(query_tokens)
     scores = list(scores)
 
-    scored_docs = list(zip(scores, vectorless_docs))
+    scored_docs = list(zip(scores, vectorless_docs[chat_session_id]))
 
     scored_docs = sorted(
         scored_docs,
@@ -387,7 +392,7 @@ def preprocess_query(query):
 
 
 
-def keyword_retrieval(query):
+def keyword_retrieval(query, chat_session_id):
 
     global vectorless_docs
 
@@ -395,7 +400,9 @@ def keyword_retrieval(query):
 
     matched_docs = []
 
-    for doc in vectorless_docs:
+    docs = vectorless_docs.get(chat_session_id, [])
+
+    for doc in docs:
         text = doc.page_content.lower()
 
         if any(token in text for token in query_tokens):
@@ -404,13 +411,13 @@ def keyword_retrieval(query):
     return matched_docs[:5]
 
 
-def hybrid_retrieval(query):
+def hybrid_retrieval(query, chat_session_id):
 
     top_k = dynamic_top_k(query)
 
-    bm25_docs = bm25_retrieval(query)
+    bm25_docs = bm25_retrieval(query, chat_session_id)
 
-    keyword_docs = keyword_retrieval(query)
+    keyword_docs = keyword_retrieval(query, chat_session_id)
 
     combined_docs = bm25_docs + keyword_docs
 
@@ -426,6 +433,8 @@ def hybrid_retrieval(query):
 
     return unique_docs[:top_k]
 
+
+#diff queries need different retrieval sizes 
 def dynamic_top_k(query):
 
     query = query.lower()
