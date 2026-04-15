@@ -6,7 +6,7 @@ from typing import Optional, List
 import streamlit as st 
 
 from multimodal import get_response
-from vector_db import process_and_save_pdfs
+
 
 import pickle
 import os
